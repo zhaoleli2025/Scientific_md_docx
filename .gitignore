@@ -1,6 +1,6 @@
 __pycache__/
 *.py[cod]
-*.docx
-*.pdf
+outputs/
+*.tmp.docx
 ~$*
 .DS_Store
