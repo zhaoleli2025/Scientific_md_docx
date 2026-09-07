@@ -10,9 +10,7 @@ import tempfile
 from pathlib import Path
 
 from md_common import (
-    CITATION_RE,
     citation_order,
-    expand_citation,
     fence_mask,
     format_citation,
     iter_citations,
@@ -50,15 +48,15 @@ def normalize(text: str) -> tuple[str, list[int]]:
     mapping = {old: new for new, old in enumerate(order, start=1)}
 
     renumbered = list(lines)
-    for index, line in enumerate(renumbered):
-        if mask[index] or heading <= index < section_end:
-            continue
-
-        def replace(match):
-            old_numbers = expand_citation(match.group("cites"))
-            return format_citation(mapping[number] for number in old_numbers)
-
-        renumbered[index] = CITATION_RE.sub(replace, line)
+    occurrences = list(iter_citations(lines, mask))
+    for occurrence in reversed(occurrences):
+        line = renumbered[occurrence.line]
+        replacement = format_citation(
+            mapping[number] for number in occurrence.numbers
+        )
+        renumbered[occurrence.line] = (
+            line[: occurrence.start] + replacement + line[occurrence.end :]
+        )
 
     by_number = {entry.number: entry for entry in entries}
     normalized_body = [*renumbered[:heading], lines[heading], ""]

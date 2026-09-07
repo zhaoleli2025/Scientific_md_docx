@@ -10,7 +10,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from md_common import (
-    CITATION_RE,
     HEADING_RE,
     IMAGE_RE,
     citation_order,
@@ -18,6 +17,7 @@ from md_common import (
     format_citation,
     is_table_start,
     iter_citations,
+    iter_line_citations,
     next_nonblank_index,
     parse_image_target,
     parse_references,
@@ -84,7 +84,7 @@ def validate(path: Path) -> list[Issue]:
         )
 
     for index, match in headings:
-        if CITATION_RE.search(match.group(2)):
+        if next(iter_line_citations(match.group(2)), None) is not None:
             add(
                 issues,
                 "warning",

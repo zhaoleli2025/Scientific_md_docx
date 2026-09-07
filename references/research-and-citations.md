@@ -67,6 +67,8 @@ Consecutive sources are compressed.[4–6]
 
 Reuse the same number for the same source. Put citations immediately after the supported claim and punctuation. Keep them out of headings, code/YAML/JSON, and Mermaid nodes; cite the explanatory sentence or figure note instead.
 
+For a literal bracketed number in prose, escape the opening bracket (`\[1]`). The scripts also leave bracketed numbers inside inline or fenced code, inline math, links, and block comments unchanged.
+
 Place one numbered entry per source under `## References`, retaining a DOI, PMID, version, or stable URL when available. Never manufacture missing metadata. During web research, use normal source links in conversation; in the Markdown artifact, map the same verified sources to this numbered bibliography.
 
 Before delivery, run the citation standardizer and strict validator listed in `SKILL.md`.

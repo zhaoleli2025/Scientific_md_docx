@@ -59,6 +59,7 @@ from md_common import (
     document_title,
     fence_closer,
     is_table_start,
+    iter_line_citations,
     next_nonblank_index,
     parse_image_target,
     parse_link_target,
@@ -84,6 +85,7 @@ INLINE_RE = re.compile(
     rf"|(?P<citation>(?<![\w!])\[{CITATION_EXPRESSION}\](?!\s*\())"
     r"|(?P<italic>(?<!\*)\*[^*\n]+\*(?!\*))"
 )
+MARKDOWN_ESCAPE_RE = re.compile(r"\\([\\`*{}\[\]()#+\-.!_|>])")
 
 
 class Renderer:
@@ -114,7 +116,11 @@ class Renderer:
         ) / EMU_PER_INCH
 
     def _new_paragraph(self, *, style=None, alignment=None, **formatting):
-        paragraph = self.document.add_paragraph(style=style) if style else self.document.add_paragraph()
+        paragraph = (
+            self.document.add_paragraph(style=style)
+            if style
+            else self.document.add_paragraph()
+        )
         for name, value in formatting.items():
             setattr(paragraph.paragraph_format, name, value)
         if alignment is not None:
@@ -143,9 +149,17 @@ class Renderer:
         )
         return run
 
-    def add_hyperlink(self, paragraph, label: str, target: str, *, bold: bool) -> None:
+    def add_hyperlink(
+        self,
+        paragraph,
+        label: str,
+        target: str,
+        *,
+        bold: bool,
+        italic: bool,
+    ) -> None:
         if not re.match(r"^(?:https?|mailto):", target, re.I):
-            self.add_text(paragraph, label, bold=bold)
+            self.add_text(paragraph, label, bold=bold, italic=italic)
             return
         relationship = paragraph.part.relate_to(
             target, RELATIONSHIP_TYPE.HYPERLINK, is_external=True
@@ -162,11 +176,19 @@ class Renderer:
             self.profile.font,
             self.profile.font_size,
             bold=bold,
+            italic=italic,
             color=BLUE,
             underline=True,
         )
 
-    def add_math(self, paragraph, expression: str, *, bold: bool = False) -> None:
+    def add_math(
+        self,
+        paragraph,
+        expression: str,
+        *,
+        bold: bool = False,
+        italic: bool = False,
+    ) -> None:
         value = linearize_math(expression)
         cursor = 0
         for match in re.finditer(r"([_^])(?:\{([^{}]+)\}|([^\s]))", value):
@@ -175,6 +197,7 @@ class Renderer:
                     paragraph,
                     value[cursor : match.start()],
                     bold=bold,
+                    italic=italic,
                     font="Cambria Math",
                 )
             token = match.group(2) or match.group(3) or ""
@@ -182,6 +205,7 @@ class Renderer:
                 paragraph,
                 token,
                 bold=bold,
+                italic=italic,
                 font="Cambria Math",
                 size=self.profile.font_size * 0.88,
             )
@@ -189,7 +213,13 @@ class Renderer:
             run.font.subscript = match.group(1) == "_"
             cursor = match.end()
         if cursor < len(value):
-            self.add_text(paragraph, value[cursor:], bold=bold, font="Cambria Math")
+            self.add_text(
+                paragraph,
+                value[cursor:],
+                bold=bold,
+                italic=italic,
+                font="Cambria Math",
+            )
 
     def add_inline(
         self,
@@ -197,14 +227,28 @@ class Renderer:
         text: str,
         *,
         base_bold: bool = False,
+        base_italic: bool = False,
         size: float | None = None,
     ) -> None:
         text = text.replace(r"\($", "$").replace(r"$\)", "$")
+        citation_spans = {
+            (occurrence.start, occurrence.end)
+            for occurrence in iter_line_citations(text)
+        }
         cursor = 0
         for match in INLINE_RE.finditer(text):
+            if (
+                match.lastgroup == "citation"
+                and (match.start(), match.end()) not in citation_spans
+            ):
+                continue
             if match.start() > cursor:
                 self.add_plain_with_breaks(
-                    paragraph, text[cursor : match.start()], bold=base_bold, size=size
+                    paragraph,
+                    text[cursor : match.start()],
+                    bold=base_bold,
+                    italic=base_italic,
+                    size=size,
                 )
             token = match.group(0)
             if match.lastgroup == "link":
@@ -215,16 +259,30 @@ class Renderer:
                         link.group("label"),
                         parse_link_target(link.group("target")),
                         bold=base_bold,
+                        italic=base_italic,
                     )
             elif match.lastgroup == "bold":
-                self.add_text(paragraph, token[2:-2], bold=True, size=size)
+                self.add_inline(
+                    paragraph,
+                    token[2:-2],
+                    base_bold=True,
+                    base_italic=base_italic,
+                    size=size,
+                )
             elif match.lastgroup == "italic":
-                self.add_text(paragraph, token[1:-1], bold=base_bold, italic=True, size=size)
+                self.add_inline(
+                    paragraph,
+                    token[1:-1],
+                    base_bold=base_bold,
+                    base_italic=True,
+                    size=size,
+                )
             elif match.lastgroup == "code":
                 run = self.add_text(
                     paragraph,
                     token[1:-1],
                     bold=base_bold,
+                    italic=base_italic,
                     font="Courier New",
                     size=(size or self.profile.font_size) * 0.92,
                 )
@@ -232,28 +290,60 @@ class Renderer:
                 shading.set(qn("w:fill"), "EFEFEF")
                 run._element.get_or_add_rPr().append(shading)
             elif match.lastgroup == "math":
-                self.add_math(paragraph, token[1:-1], bold=base_bold)
+                self.add_math(
+                    paragraph,
+                    token[1:-1],
+                    bold=base_bold,
+                    italic=base_italic,
+                )
             elif match.lastgroup == "citation":
                 if self.profile.citation_style == "superscript":
                     run = self.add_text(
                         paragraph,
                         token[1:-1],
+                        bold=base_bold,
+                        italic=base_italic,
                         size=(size or self.profile.font_size) * 0.82,
                     )
                     run.font.superscript = True
                 else:
-                    self.add_text(paragraph, token, bold=base_bold, size=size)
+                    self.add_text(
+                        paragraph,
+                        token,
+                        bold=base_bold,
+                        italic=base_italic,
+                        size=size,
+                    )
             cursor = match.end()
         if cursor < len(text):
-            self.add_plain_with_breaks(paragraph, text[cursor:], bold=base_bold, size=size)
+            self.add_plain_with_breaks(
+                paragraph,
+                text[cursor:],
+                bold=base_bold,
+                italic=base_italic,
+                size=size,
+            )
 
     def add_plain_with_breaks(
-        self, paragraph, text: str, *, bold: bool = False, size: float | None = None
+        self,
+        paragraph,
+        text: str,
+        *,
+        bold: bool = False,
+        italic: bool = False,
+        size: float | None = None,
     ) -> None:
         parts = re.split(r"<br\s*/?>", text, flags=re.I)
         for index, part in enumerate(parts):
             if part:
-                self.add_text(paragraph, part, bold=bold, size=size)
+                visible = MARKDOWN_ESCAPE_RE.sub(r"\1", part)
+                self.add_text(
+                    paragraph,
+                    visible,
+                    bold=bold,
+                    italic=italic,
+                    size=size,
+                )
             if index + 1 < len(parts):
                 paragraph.add_run().add_break()
 

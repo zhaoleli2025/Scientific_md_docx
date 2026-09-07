@@ -14,7 +14,9 @@ IMAGE_RE = re.compile(r"^\s*!\[(?P<alt>[^]]*)\]\((?P<target>[^)]+)\)\s*$")
 REFERENCE_HEADING_RE = re.compile(
     r"^\s*#{1,6}\s+(?:references|bibliography)\s*$", re.IGNORECASE
 )
-REFERENCE_ENTRY_RE = re.compile(r"^(?P<indent>\s*)(?P<number>\d+)[.)](?P<space>\s+)(?P<text>\S.*)$")
+REFERENCE_ENTRY_RE = re.compile(
+    r"^(?P<indent>\s*)(?P<number>\d+)[.)](?P<space>\s+)(?P<text>\S.*)$"
+)
 FENCE_RE = re.compile(r"^\s*(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 CITATION_EXPRESSION = r"\d+(?:\s*(?:,|[-–—])\s*\d+)*"
 CITATION_RE = re.compile(
@@ -24,6 +26,10 @@ SEPARATOR_CELL_RE = re.compile(r"^:?-{3,}:?$")
 TABLE_CAPTION_RE = re.compile(
     r"Table\s+(?:[A-Za-z]*\d+|[IVXLCDM]+)[.:]\s+\S.*", re.IGNORECASE
 )
+BACKTICK_RUN_RE = re.compile(r"`+")
+INLINE_MATH_RE = re.compile(r"\$[^$\n]+\$")
+INLINE_LINK_RE = re.compile(r"!?\[[^]\n]*\]\([^)\n]+\)")
+AUTOLINK_RE = re.compile(r"<(?:https?://|mailto:)[^>\n]+>", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -62,13 +68,25 @@ def fence_closer(fence: str) -> re.Pattern[str]:
 
 
 def fence_mask(lines: Sequence[str]) -> list[bool]:
-    """Return a mask for fenced lines, raising on an unclosed fence."""
+    """Mask fenced blocks and block comments, raising on an unclosed fence."""
 
     mask = [False] * len(lines)
     close_re: re.Pattern[str] | None = None
     opening_line = 0
+    in_comment = False
     for index, line in enumerate(lines):
+        if in_comment:
+            mask[index] = True
+            if "-->" in line:
+                in_comment = False
+            continue
+
         if close_re is None:
+            stripped = line.lstrip()
+            if stripped.startswith("<!--"):
+                mask[index] = True
+                in_comment = "-->" not in stripped[4:]
+                continue
             match = FENCE_RE.match(line)
             if match is None:
                 continue
@@ -200,6 +218,63 @@ def format_citation(numbers: Iterable[int]) -> str:
     return f"[{compress_numbers(numbers)}]"
 
 
+def _code_span_ranges(line: str) -> list[tuple[int, int]]:
+    """Return ranges for matched CommonMark-style backtick code spans."""
+
+    runs = list(BACKTICK_RUN_RE.finditer(line))
+    ranges: list[tuple[int, int]] = []
+    opener_index = 0
+    while opener_index < len(runs):
+        opener = runs[opener_index]
+        closer_index = opener_index + 1
+        while closer_index < len(runs):
+            closer = runs[closer_index]
+            if len(closer.group(0)) == len(opener.group(0)):
+                ranges.append((opener.start(), closer.end()))
+                opener_index = closer_index + 1
+                break
+            closer_index += 1
+        else:
+            opener_index += 1
+    return ranges
+
+
+def _protected_inline_ranges(line: str) -> list[tuple[int, int]]:
+    """Return inline ranges whose bracketed numbers are literal content."""
+
+    ranges = _code_span_ranges(line)
+    for pattern in (INLINE_MATH_RE, INLINE_LINK_RE, AUTOLINK_RE):
+        ranges.extend((match.start(), match.end()) for match in pattern.finditer(line))
+    return ranges
+
+
+def _is_escaped(line: str, index: int) -> bool:
+    backslashes = 0
+    index -= 1
+    while index >= 0 and line[index] == "\\":
+        backslashes += 1
+        index -= 1
+    return backslashes % 2 == 1
+
+
+def iter_line_citations(line: str, line_index: int = 0) -> Iterator[CitationOccurrence]:
+    """Yield citations in one line, excluding literal inline constructs."""
+
+    protected = _protected_inline_ranges(line)
+    for match in CITATION_RE.finditer(line):
+        if _is_escaped(line, match.start()) or any(
+            start <= match.start() < end for start, end in protected
+        ):
+            continue
+        yield CitationOccurrence(
+            line=line_index,
+            start=match.start(),
+            end=match.end(),
+            raw=match.group(0),
+            numbers=tuple(expand_citation(match.group("cites"))),
+        )
+
+
 def iter_citations(
     lines: Sequence[str],
     mask: Sequence[bool] | None = None,
@@ -220,14 +295,7 @@ def iter_citations(
             heading is not None and heading <= line_index < section_end
         ):
             continue
-        for match in CITATION_RE.finditer(lines[line_index]):
-            yield CitationOccurrence(
-                line=line_index,
-                start=match.start(),
-                end=match.end(),
-                raw=match.group(0),
-                numbers=tuple(expand_citation(match.group("cites"))),
-            )
+        yield from iter_line_citations(lines[line_index], line_index)
 
 
 def citation_order(
@@ -265,7 +333,7 @@ def split_table_row(line: str) -> list[str]:
 
     cells: list[str] = []
     buffer: list[str] = []
-    in_code = False
+    code_ranges = _code_span_ranges(value)
     index = 0
     while index < len(value):
         char = value[index]
@@ -273,11 +341,7 @@ def split_table_row(line: str) -> list[str]:
             buffer.append("|")
             index += 2
             continue
-        if char == "`":
-            in_code = not in_code
-            buffer.append(char)
-            index += 1
-            continue
+        in_code = any(start <= index < end for start, end in code_ranges)
         if char == "|" and not in_code:
             cells.append("".join(buffer).strip())
             buffer.clear()
