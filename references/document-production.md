@@ -24,7 +24,9 @@ Useful patterns include:
 
 State shared units in headers, explain abbreviations below the table, and cite the claim-bearing cell or introductory sentence. Preserve `not available`, `not assessed`, `not detected`, and `not applicable` as distinct states. Split a table rather than filling it with paragraph-length cells.
 
-Write a caption as `Table 1. Caption` once, immediately above the table. Never repeat a table caption below it; the renderer applies the Word Caption style to this form.
+Write a caption once, immediately above the table, as `Table 1. Concise description.` or, when a citation is warranted, `Table 2. Thresholds adapted from the guideline.[1]` The renderer applies the Word Caption style and preserves the citation style. Default to one sentence and no more than roughly 35 words. Identify what the table shows and only the essential population, setting, time point, or unit; move methods, abbreviations, caveats, and interpretation into a table note or nearby prose.
+
+Cite the direct source in the caption when a table is adapted, modified, or reproduced, or when the caption itself makes an externally supported claim. When rows or cells come from different sources, cite those cells instead of collecting unrelated citations in the caption. A caption describing original local results does not need an external citation unless it adds an external claim. Never cite a source that did not provide the attributed content.
 
 ## Structured blocks and workflows
 
@@ -49,7 +51,7 @@ Keep PNG for plots, diagrams, screenshots, and text. Use JPEG only for photograp
 
 ## Render to DOCX
 
-The bundled renderer supports headings, paragraphs, blockquotes, basic lists, inline emphasis/code/simple mathematics, links, numeric citations, captions above pipe tables, fenced blocks, Mermaid, local PNG/JPEG images, and numbered references.
+The bundled renderer supports headings, paragraphs, blockquotes, basic lists, inline emphasis/code/simple mathematics, links, numeric citations, concise cited captions above pipe tables, fenced blocks, Mermaid, local PNG/JPEG images, and numbered references.
 
 It does not create live Zotero fields, tracked changes, footnotes/endnotes, complex Word equations, merged Markdown table cells, or remote-image downloads. Use a specialized pipeline when those features are essential.
 
@@ -66,4 +68,4 @@ Options can override font, size, citation/table style, orientation, or a clean D
 
 ## Final check
 
-Verify that headings, tables, figures, code, citations, and references are present; each table caption appears once above its table; wide tables are legible; citation markers still support the same claims; code indentation is preserved; diagram branches match the source; no fallback warning was missed; and Word or LibreOffice opens the file. Structural validation cannot establish scientific truth or translation fidelity.
+Verify that headings, tables, figures, code, citations, and references are present; each table caption is concise, appears once above its table, and cites only the sources that support its content; wide tables are legible; citation markers still support the same claims; code indentation is preserved; diagram branches match the source; no fallback warning was missed; and Word or LibreOffice opens the file. Structural validation cannot establish scientific truth or translation fidelity.

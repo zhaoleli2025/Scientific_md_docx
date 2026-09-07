@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from md_common import (
+    CITATION_RE,
     HEADING_RE,
     IMAGE_RE,
     citation_order,
@@ -22,6 +23,7 @@ from md_common import (
     parse_image_target,
     parse_references,
     parse_table_rows,
+    plain_text,
     reference_section_end,
     split_table_row,
     strip_front_matter,
@@ -30,6 +32,15 @@ from md_common import (
 
 
 DOI_RE = re.compile(r"(?:doi:\s*|https?://doi\.org/)(10\.\d{4,9}/\S+)", re.I)
+TABLE_CAPTION_PREFIX_RE = re.compile(
+    r"^Table\s+(?:[A-Za-z]*\d+|[IVXLCDM]+)[.:]\s+", re.IGNORECASE
+)
+CAPTION_SOURCE_RE = re.compile(
+    r"\b(?:adapted|modified|reproduced)\s+from\b", re.IGNORECASE
+)
+CAPTION_WORD_RE = re.compile(r"\b\w+(?:[-'’]\w+)*\b", re.UNICODE)
+MAX_TABLE_CAPTION_WORDS = 35
+MAX_TABLE_CAPTION_CHARACTERS = 240
 
 
 @dataclass(frozen=True)
@@ -215,6 +226,52 @@ def validate(path: Path) -> list[Issue]:
             else:
                 seen_dois[doi] = entry.number
 
+    for index, line in enumerate(body_lines):
+        if mask[index]:
+            continue
+        caption = table_caption_text(line)
+        if caption is None:
+            continue
+
+        following = next_nonblank_index(body_lines, index + 1)
+        if following is None or not is_table_start(body_lines, following, mask):
+            add(
+                issues,
+                "error",
+                "table-caption-position",
+                "Place the table caption once, immediately above the table",
+                index + offset + 1,
+            )
+
+        caption_body = TABLE_CAPTION_PREFIX_RE.sub("", caption, count=1)
+        visible_caption = plain_text(CITATION_RE.sub("", caption_body)).strip()
+        word_count = len(CAPTION_WORD_RE.findall(visible_caption))
+        if (
+            word_count > MAX_TABLE_CAPTION_WORDS
+            or len(visible_caption) > MAX_TABLE_CAPTION_CHARACTERS
+        ):
+            add(
+                issues,
+                "warning",
+                "table-caption-length",
+                "Keep the table caption to one concise sentence; move detail "
+                "to a table note or nearby prose",
+                index + offset + 1,
+            )
+
+        if (
+            CAPTION_SOURCE_RE.search(visible_caption)
+            and next(iter_line_citations(caption), None) is None
+        ):
+            add(
+                issues,
+                "warning",
+                "table-caption-citation",
+                "Add the direct-source citation for an adapted, modified, or "
+                "reproduced table",
+                index + offset + 1,
+            )
+
     index = 0
     while index + 1 < len(body_lines):
         if mask[index]:
@@ -250,25 +307,6 @@ def validate(path: Path) -> list[Issue]:
                     "Table has a header but no data rows",
                     index + offset + 1,
                 )
-            caption_index = next_nonblank_index(body_lines, cursor)
-            if (
-                caption_index is not None
-                and not mask[caption_index]
-                and table_caption_text(body_lines[caption_index]) is not None
-            ):
-                following = next_nonblank_index(body_lines, caption_index + 1)
-                caption_belongs_to_next_table = (
-                    following is not None
-                    and is_table_start(body_lines, following, mask)
-                )
-                if not caption_belongs_to_next_table:
-                    add(
-                        issues,
-                        "error",
-                        "table-caption-position",
-                        "Place the table caption once, immediately above the table",
-                        caption_index + offset + 1,
-                    )
             index = cursor
             continue
         index += 1
