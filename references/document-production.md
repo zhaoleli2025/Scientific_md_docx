@@ -24,6 +24,8 @@ Useful patterns include:
 
 State shared units in headers, explain abbreviations below the table, and cite the claim-bearing cell or introductory sentence. Preserve `not available`, `not assessed`, `not detected`, and `not applicable` as distinct states. Split a table rather than filling it with paragraph-length cells.
 
+Write a caption as `Table 1. Caption` once, immediately above the table. Never repeat a table caption below it; the renderer applies the Word Caption style to this form.
+
 ## Structured blocks and workflows
 
 Add a language label to every fenced block. Make placeholders visibly different from actual study or case values. Do not use code blocks merely to place a border around prose.
@@ -41,19 +43,17 @@ flowchart TD
 
 Use actions for process nodes, questions for decisions, and labels for every branch. Show meaningful failure, unavailable-data, stop, and review routes. Put citations in the accompanying sentence or figure note, not inside Mermaid nodes. Confirm that prose, tables, structured blocks, and workflows express the same states and outcomes.
 
+## Image formats
+
+Keep PNG for plots, diagrams, screenshots, and text. Use JPEG only for photographic images when lossy compression is acceptable; do not convert diagnostic images, masks, or line art merely to reduce file size.
+
 ## Render to DOCX
 
-The bundled renderer supports headings, paragraphs, blockquotes, basic lists, inline emphasis/code/simple mathematics, links, numeric citations, pipe tables with escaped pipes, fenced blocks, Mermaid, local PNG/JPEG images, and numbered references.
+The bundled renderer supports headings, paragraphs, blockquotes, basic lists, inline emphasis/code/simple mathematics, links, numeric citations, captions above pipe tables, fenced blocks, Mermaid, local PNG/JPEG images, and numbered references.
 
 It does not create live Zotero fields, tracked changes, footnotes/endnotes, complex Word equations, merged Markdown table cells, or remote-image downloads. Use a specialized pipeline when those features are essential.
 
-Run the detection-compatible path:
-
-```bash
-python scripts/standardize_citations.py report.md --in-place
-python scripts/validate_markdown.py report.md --strict
-python scripts/render_docx.py report.md --profile nature
-```
+Use the standardize → strict-validation → render pipeline listed in `SKILL.md`.
 
 Profiles:
 
@@ -66,4 +66,4 @@ Options can override font, size, citation/table style, orientation, or a clean D
 
 ## Final check
 
-Verify that headings, tables, figures, code, citations, and references are present; wide tables are legible; citation markers still support the same claims; code indentation is preserved; diagram branches match the source; no fallback warning was missed; and Word or LibreOffice opens the file. Structural validation cannot establish scientific truth or translation fidelity.
+Verify that headings, tables, figures, code, citations, and references are present; each table caption appears once above its table; wide tables are legible; citation markers still support the same claims; code indentation is preserved; diagram branches match the source; no fallback warning was missed; and Word or LibreOffice opens the file. Structural validation cannot establish scientific truth or translation fidelity.

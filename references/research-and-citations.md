@@ -69,11 +69,6 @@ Reuse the same number for the same source. Put citations immediately after the s
 
 Place one numbered entry per source under `## References`, retaining a DOI, PMID, version, or stable URL when available. Never manufacture missing metadata. During web research, use normal source links in conversation; in the Markdown artifact, map the same verified sources to this numbered bibliography.
 
-Before delivery, run:
-
-```bash
-python scripts/standardize_citations.py document.md --in-place
-python scripts/validate_markdown.py document.md --strict
-```
+Before delivery, run the citation standardizer and strict validator listed in `SKILL.md`.
 
 The standardizer renumbers existing citations and bibliography entries. It does not discover evidence, merge duplicate publications, or verify claim support.

@@ -6,17 +6,24 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Iterable, Iterator, Sequence
+from urllib.parse import unquote
 
 
+HEADING_RE = re.compile(r"^\s*(#{1,6})\s+(.+?)\s*$")
+IMAGE_RE = re.compile(r"^\s*!\[(?P<alt>[^]]*)\]\((?P<target>[^)]+)\)\s*$")
 REFERENCE_HEADING_RE = re.compile(
     r"^\s*#{1,6}\s+(?:references|bibliography)\s*$", re.IGNORECASE
 )
 REFERENCE_ENTRY_RE = re.compile(r"^(?P<indent>\s*)(?P<number>\d+)[.)](?P<space>\s+)(?P<text>\S.*)$")
 FENCE_RE = re.compile(r"^\s*(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
+CITATION_EXPRESSION = r"\d+(?:\s*(?:,|[-–—])\s*\d+)*"
 CITATION_RE = re.compile(
-    r"(?<![\w!])\[(?P<cites>\d+(?:\s*(?:,|[-–—])\s*\d+)*)\](?!\s*\()"
+    rf"(?<![\w!])\[(?P<cites>{CITATION_EXPRESSION})\](?!\s*\()"
 )
 SEPARATOR_CELL_RE = re.compile(r"^:?-{3,}:?$")
+TABLE_CAPTION_RE = re.compile(
+    r"Table\s+(?:[A-Za-z]*\d+|[IVXLCDM]+)[.:]\s+\S.*", re.IGNORECASE
+)
 
 
 @dataclass(frozen=True)
@@ -50,34 +57,32 @@ class CitationOccurrence:
     numbers: tuple[int, ...]
 
 
+def fence_closer(fence: str) -> re.Pattern[str]:
+    return re.compile(rf"^\s*{re.escape(fence[0])}{{{len(fence)},}}\s*$")
+
+
 def fence_mask(lines: Sequence[str]) -> list[bool]:
     """Return a mask for fenced lines, raising on an unclosed fence."""
 
     mask = [False] * len(lines)
-    active_char: str | None = None
-    active_length = 0
+    close_re: re.Pattern[str] | None = None
     opening_line = 0
     for index, line in enumerate(lines):
-        if active_char is None:
+        if close_re is None:
             match = FENCE_RE.match(line)
             if match is None:
                 continue
             fence = match.group("fence")
-            active_char = fence[0]
-            active_length = len(fence)
+            close_re = fence_closer(fence)
             opening_line = index + 1
             mask[index] = True
             continue
 
         mask[index] = True
-        close_re = re.compile(
-            rf"^\s*{re.escape(active_char)}{{{active_length},}}\s*$"
-        )
         if close_re.match(line):
-            active_char = None
-            active_length = 0
+            close_re = None
 
-    if active_char is not None:
+    if close_re is not None:
         raise ValueError(f"Unclosed fenced block beginning at line {opening_line}")
     return mask
 
@@ -94,6 +99,18 @@ def reference_heading_index(
     return None
 
 
+def reference_section_end(
+    lines: Sequence[str], heading: int, mask: Sequence[bool] | None = None
+) -> int:
+    """Return the first heading after the bibliography, or the document end."""
+
+    active_mask = list(mask) if mask is not None else fence_mask(lines)
+    for index in range(heading + 1, len(lines)):
+        if not active_mask[index] and HEADING_RE.match(lines[index]):
+            return index
+    return len(lines)
+
+
 def parse_references(
     lines: Sequence[str], mask: Sequence[bool] | None = None
 ) -> tuple[int | None, list[ReferenceEntry]]:
@@ -104,15 +121,16 @@ def parse_references(
     if heading is None:
         return None, []
 
+    section_end = reference_section_end(lines, heading, active_mask)
     starts: list[int] = []
-    for index in range(heading + 1, len(lines)):
+    for index in range(heading + 1, section_end):
         if not active_mask[index] and REFERENCE_ENTRY_RE.match(lines[index]):
             starts.append(index)
 
     entries: list[ReferenceEntry] = []
     seen: set[int] = set()
     for position, start in enumerate(starts):
-        end = starts[position + 1] if position + 1 < len(starts) else len(lines)
+        end = starts[position + 1] if position + 1 < len(starts) else section_end
         while end > start + 1 and not lines[end - 1].strip():
             end -= 1
         match = REFERENCE_ENTRY_RE.match(lines[start])
@@ -186,15 +204,21 @@ def iter_citations(
     lines: Sequence[str],
     mask: Sequence[bool] | None = None,
     *,
-    stop_at_references: bool = True,
+    exclude_references: bool = True,
 ) -> Iterator[CitationOccurrence]:
-    """Yield numeric citations outside code fences and the bibliography."""
+    """Yield citations outside fenced blocks and the bibliography section."""
 
     active_mask = list(mask) if mask is not None else fence_mask(lines)
-    heading = reference_heading_index(lines, active_mask) if stop_at_references else None
-    limit = heading if heading is not None else len(lines)
-    for line_index in range(limit):
-        if active_mask[line_index]:
+    heading = reference_heading_index(lines, active_mask) if exclude_references else None
+    section_end = (
+        reference_section_end(lines, heading, active_mask)
+        if heading is not None
+        else None
+    )
+    for line_index in range(len(lines)):
+        if active_mask[line_index] or (
+            heading is not None and heading <= line_index < section_end
+        ):
             continue
         for match in CITATION_RE.finditer(lines[line_index]):
             yield CitationOccurrence(
@@ -269,6 +293,30 @@ def is_table_separator(line: str) -> bool:
     return bool(cells) and all(SEPARATOR_CELL_RE.fullmatch(cell) for cell in cells)
 
 
+def is_table_start(
+    lines: Sequence[str], index: int, mask: Sequence[bool] | None = None
+) -> bool:
+    return (
+        index + 1 < len(lines)
+        and (mask is None or (not mask[index] and not mask[index + 1]))
+        and "|" in lines[index]
+        and is_table_separator(lines[index + 1])
+    )
+
+
+def parse_table_rows(
+    lines: Sequence[str], start: int, mask: Sequence[bool] | None = None
+) -> tuple[int, list[tuple[int, list[str]]]]:
+    rows: list[tuple[int, list[str]]] = []
+    index = start
+    while index < len(lines) and lines[index].strip() and "|" in lines[index]:
+        if mask is not None and mask[index]:
+            break
+        rows.append((index, split_table_row(lines[index])))
+        index += 1
+    return index, rows
+
+
 def plain_text(markdown: str) -> str:
     """Return a rough visible-text form for sizing and metadata."""
 
@@ -279,6 +327,46 @@ def plain_text(markdown: str) -> str:
     value = re.sub(r"`([^`]+)`", r"\1", value)
     value = value.replace(r"\|", "|")
     return value.strip()
+
+
+def parse_link_target(raw: str) -> str:
+    value = raw.strip()
+    if value.startswith("<") and ">" in value:
+        return value[1 : value.index(">")]
+    match = re.match(r"(\S+)(?:\s+[\"'].*[\"'])?$", value)
+    return match.group(1) if match else value
+
+
+def parse_image_target(raw: str) -> str:
+    """Parse and URL-decode a local or remote Markdown image target."""
+
+    return unquote(parse_link_target(raw))
+
+
+def table_caption_text(line: str) -> str | None:
+    """Return a `Table N. ...` caption, allowing optional emphasis wrappers."""
+
+    value = line.strip()
+    for marker in ("**", "__", "*", "_"):
+        if value.startswith(marker) and value.endswith(marker):
+            value = value[len(marker) : -len(marker)].strip()
+            break
+    return value if TABLE_CAPTION_RE.fullmatch(value) else None
+
+
+def next_nonblank_index(lines: Sequence[str], start: int) -> int | None:
+    for index in range(start, len(lines)):
+        if lines[index].strip():
+            return index
+    return None
+
+
+def document_title(lines: Sequence[str], fallback: str) -> str:
+    for line in lines:
+        match = HEADING_RE.match(line)
+        if match and len(match.group(1)) == 1:
+            return plain_text(match.group(2))
+    return fallback
 
 
 def strip_front_matter(lines: Sequence[str]) -> tuple[list[str], int]:

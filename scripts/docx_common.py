@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Sequence
 
 from docx.enum.section import WD_ORIENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -14,9 +13,6 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 from docx.text.run import Run
-
-from md_common import plain_text
-
 
 BLACK = RGBColor(0, 0, 0)
 BLUE = RGBColor(5, 99, 193)
@@ -47,6 +43,21 @@ PROFILES = {
 }
 
 
+def _element(tag: str, **attributes):
+    element = OxmlElement(tag)
+    for name, value in attributes.items():
+        element.set(qn(f"w:{name}"), str(value))
+    return element
+
+
+def _get_or_add(parent, tag: str, *, index: int | None = None):
+    element = parent.find(qn(tag))
+    if element is None:
+        element = OxmlElement(tag)
+        parent.append(element) if index is None else parent.insert(index, element)
+    return element
+
+
 def set_run_font(
     run: Run,
     font: str,
@@ -67,47 +78,28 @@ def set_run_font(
     if underline is not None:
         run.underline = underline
     properties = run._element.get_or_add_rPr()
-    fonts = properties.find(qn("w:rFonts"))
-    if fonts is None:
-        fonts = OxmlElement("w:rFonts")
-        properties.insert(0, fonts)
+    fonts = _get_or_add(properties, "w:rFonts", index=0)
     for attribute in ("ascii", "hAnsi", "eastAsia", "cs"):
         fonts.set(qn(f"w:{attribute}"), font)
 
 
 def shade_paragraph(paragraph, fill: str) -> None:
     properties = paragraph._p.get_or_add_pPr()
-    shading = properties.find(qn("w:shd"))
-    if shading is None:
-        shading = OxmlElement("w:shd")
-        properties.append(shading)
+    shading = _get_or_add(properties, "w:shd")
     shading.set(qn("w:val"), "clear")
     shading.set(qn("w:fill"), fill)
 
 
 def paragraph_left_border(paragraph, color: str = "B7B7B7") -> None:
     properties = paragraph._p.get_or_add_pPr()
-    borders = properties.find(qn("w:pBdr"))
-    if borders is None:
-        borders = OxmlElement("w:pBdr")
-        properties.append(borders)
-    left = OxmlElement("w:left")
-    left.set(qn("w:val"), "single")
-    left.set(qn("w:sz"), "12")
-    left.set(qn("w:space"), "8")
-    left.set(qn("w:color"), color)
-    borders.append(left)
+    borders = _get_or_add(properties, "w:pBdr")
+    borders.append(_element("w:left", val="single", sz=12, space=8, color=color))
 
 
 def horizontal_rule(paragraph) -> None:
     properties = paragraph._p.get_or_add_pPr()
     borders = OxmlElement("w:pBdr")
-    bottom = OxmlElement("w:bottom")
-    bottom.set(qn("w:val"), "single")
-    bottom.set(qn("w:sz"), "6")
-    bottom.set(qn("w:space"), "1")
-    bottom.set(qn("w:color"), "777777")
-    borders.append(bottom)
+    borders.append(_element("w:bottom", val="single", sz=6, space=1, color="777777"))
     properties.append(borders)
 
 
@@ -115,20 +107,9 @@ def set_cell_margins(
     cell, top: int = 65, start: int = 85, bottom: int = 65, end: int = 85
 ) -> None:
     properties = cell._tc.get_or_add_tcPr()
-    margins = properties.find(qn("w:tcMar"))
-    if margins is None:
-        margins = OxmlElement("w:tcMar")
-        properties.append(margins)
-    for name, value in (
-        ("top", top),
-        ("start", start),
-        ("bottom", bottom),
-        ("end", end),
-    ):
-        node = margins.find(qn(f"w:{name}"))
-        if node is None:
-            node = OxmlElement(f"w:{name}")
-            margins.append(node)
+    margins = _get_or_add(properties, "w:tcMar")
+    for name, value in {"top": top, "start": start, "bottom": bottom, "end": end}.items():
+        node = _get_or_add(margins, f"w:{name}")
         node.set(qn("w:w"), str(value))
         node.set(qn("w:type"), "dxa")
 
@@ -136,10 +117,7 @@ def set_cell_margins(
 def set_cell_width(cell, width_inches: float) -> None:
     cell.width = Inches(width_inches)
     properties = cell._tc.get_or_add_tcPr()
-    width = properties.find(qn("w:tcW"))
-    if width is None:
-        width = OxmlElement("w:tcW")
-        properties.append(width)
+    width = _get_or_add(properties, "w:tcW")
     width.set(qn("w:w"), str(int(width_inches * 1440)))
     width.set(qn("w:type"), "dxa")
 
@@ -147,21 +125,18 @@ def set_cell_width(cell, width_inches: float) -> None:
 def repeat_table_header(row) -> None:
     properties = row._tr.get_or_add_trPr()
     if properties.find(qn("w:tblHeader")) is None:
-        properties.append(OxmlElement("w:tblHeader"))
+        properties.append(_element("w:tblHeader"))
 
 
 def prevent_row_split(row) -> None:
     properties = row._tr.get_or_add_trPr()
     if properties.find(qn("w:cantSplit")) is None:
-        properties.append(OxmlElement("w:cantSplit"))
+        properties.append(_element("w:cantSplit"))
 
 
 def set_three_line_borders(table) -> None:
     properties = table._tbl.tblPr
-    borders = properties.find(qn("w:tblBorders"))
-    if borders is None:
-        borders = OxmlElement("w:tblBorders")
-        properties.append(borders)
+    borders = _get_or_add(properties, "w:tblBorders")
     for edge, value, size in (
         ("top", "single", "12"),
         ("bottom", "single", "12"),
@@ -173,24 +148,13 @@ def set_three_line_borders(table) -> None:
         existing = borders.find(qn(f"w:{edge}"))
         if existing is not None:
             borders.remove(existing)
-        node = OxmlElement(f"w:{edge}")
-        node.set(qn("w:val"), value)
-        node.set(qn("w:sz"), size)
-        node.set(qn("w:color"), "000000")
-        borders.append(node)
+        borders.append(_element(f"w:{edge}", val=value, sz=size, color="000000"))
 
 
 def set_header_bottom_border(cell) -> None:
     properties = cell._tc.get_or_add_tcPr()
-    borders = properties.find(qn("w:tcBorders"))
-    if borders is None:
-        borders = OxmlElement("w:tcBorders")
-        properties.append(borders)
-    bottom = OxmlElement("w:bottom")
-    bottom.set(qn("w:val"), "single")
-    bottom.set(qn("w:sz"), "4")
-    bottom.set(qn("w:color"), "000000")
-    borders.append(bottom)
+    borders = _get_or_add(properties, "w:tcBorders")
+    borders.append(_element("w:bottom", val="single", sz=4, color="000000"))
 
 
 def clear_document_body(document) -> None:
@@ -207,8 +171,7 @@ def add_page_number(paragraph) -> None:
     run = paragraph.add_run()
     for kind, text in (("begin", None), (None, " PAGE "), ("end", None)):
         if kind:
-            node = OxmlElement("w:fldChar")
-            node.set(qn("w:fldCharType"), kind)
+            node = _element("w:fldChar", fldCharType=kind)
         else:
             node = OxmlElement("w:instrText")
             node.set(
@@ -216,14 +179,6 @@ def add_page_number(paragraph) -> None:
             )
             node.text = text
         run._r.append(node)
-
-
-def parse_link_target(raw: str) -> str:
-    value = raw.strip()
-    if value.startswith("<") and ">" in value:
-        return value[1 : value.index(">")]
-    match = re.match(r"(\S+)(?:\s+[\"'].*[\"'])?$", value)
-    return match.group(1) if match else value
 
 
 def linearize_math(value: str) -> str:
@@ -292,12 +247,10 @@ def configure_document(
 
     heading_sizes = {
         "Title": profile.title_size,
-        "Heading 1": max(profile.font_size + 3.0, 14.0),
-        "Heading 2": max(profile.font_size + 2.0, 13.0),
-        "Heading 3": max(profile.font_size + 1.0, 12.0),
-        "Heading 4": profile.font_size,
-        "Heading 5": profile.font_size,
-        "Heading 6": profile.font_size,
+        **{
+            f"Heading {level}": heading_size(profile, level, False)
+            for level in range(1, 7)
+        },
     }
     for name, size in heading_sizes.items():
         style = document.styles[name]
@@ -320,6 +273,8 @@ def configure_document(
     caption.font.name = profile.font
     caption.font.size = Pt(max(8.5, profile.font_size - 1.0))
     caption.font.italic = True
+    caption.paragraph_format.keep_with_next = True
+    caption.paragraph_format.space_after = Pt(3)
     if page_numbers:
         add_page_number(section.footer.paragraphs[0])
 
@@ -332,11 +287,3 @@ def heading_size(profile: Profile, level: int, is_title: bool) -> float:
         2: max(profile.font_size + 2.0, 13.0),
         3: max(profile.font_size + 1.0, 12.0),
     }.get(level, profile.font_size)
-
-
-def document_title(lines: Sequence[str], fallback: str) -> str:
-    for line in lines:
-        match = re.match(r"^\s*#\s+(.+?)\s*$", line)
-        if match:
-            return plain_text(match.group(1))
-    return fallback

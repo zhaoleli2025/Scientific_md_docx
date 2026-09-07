@@ -10,7 +10,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import urllib.parse
 import zipfile
 from dataclasses import replace
 from pathlib import Path
@@ -19,6 +18,11 @@ from typing import Sequence
 from docx import Document
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.image.exceptions import (
+    InvalidImageStreamError,
+    UnexpectedEndOfFileError,
+    UnrecognizedImageError,
+)
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.opc.constants import RELATIONSHIP_TYPE
@@ -34,12 +38,10 @@ from docx_common import (
     Profile,
     clear_document_body,
     configure_document,
-    document_title,
     heading_size,
     horizontal_rule,
     linearize_math,
     paragraph_left_border,
-    parse_link_target,
     prevent_row_split,
     repeat_table_header,
     set_cell_margins,
@@ -50,28 +52,36 @@ from docx_common import (
     shade_paragraph,
 )
 from md_common import (
+    CITATION_EXPRESSION,
     FENCE_RE,
-    is_table_separator,
+    HEADING_RE,
+    IMAGE_RE,
+    document_title,
+    fence_closer,
+    is_table_start,
+    next_nonblank_index,
+    parse_image_target,
+    parse_link_target,
+    parse_table_rows,
     plain_text,
     split_table_row,
     strip_front_matter,
+    table_caption_text,
 )
 from validate_markdown import validate
 
 
 MERMAID_PACKAGE = "@mermaid-js/mermaid-cli@11.17.0"
-HEADING_RE = re.compile(r"^\s*(#{1,6})\s+(.+?)\s*$")
 LIST_RE = re.compile(
     r"^(?P<indent>\s*)(?:(?P<bullet>[-+*])|(?P<number>\d+)[.)])\s+(?P<text>.+)$"
 )
-IMAGE_RE = re.compile(r"^\s*!\[(?P<alt>[^]]*)\]\((?P<target>[^)]+)\)\s*$")
 LINK_RE = re.compile(r"\[(?P<label>[^]\n]+)\]\((?P<target>[^)]+)\)")
 INLINE_RE = re.compile(
     r"(?P<link>\[[^]\n]+\]\([^)]+\))"
     r"|(?P<bold>\*\*[^*\n]+\*\*)"
     r"|(?P<code>`[^`\n]+`)"
     r"|(?P<math>\$[^$\n]+\$)"
-    r"|(?P<citation>(?<![\w!])\[\d+(?:\s*(?:,|[-–—])\s*\d+)*\](?!\s*\())"
+    rf"|(?P<citation>(?<![\w!])\[{CITATION_EXPRESSION}\](?!\s*\())"
     r"|(?P<italic>(?<!\*)\*[^*\n]+\*(?!\*))"
 )
 
@@ -102,6 +112,14 @@ class Renderer:
         return (
             section.page_width - section.left_margin - section.right_margin
         ) / EMU_PER_INCH
+
+    def _new_paragraph(self, *, style=None, alignment=None, **formatting):
+        paragraph = self.document.add_paragraph(style=style) if style else self.document.add_paragraph()
+        for name, value in formatting.items():
+            setattr(paragraph.paragraph_format, name, value)
+        if alignment is not None:
+            paragraph.alignment = alignment
+        return paragraph
 
     def add_text(
         self,
@@ -246,7 +264,7 @@ class Renderer:
             self.title_seen = True
         else:
             style = f"Heading {min(level, 6)}"
-        paragraph = self.document.add_paragraph(style=style)
+        paragraph = self._new_paragraph(style=style)
         self.add_inline(
             paragraph,
             text,
@@ -256,25 +274,35 @@ class Renderer:
         paragraph.paragraph_format.keep_with_next = True
 
     def add_paragraph(self, text: str) -> None:
-        paragraph = self.document.add_paragraph()
+        paragraph = self._new_paragraph()
         self.add_inline(paragraph, text)
+
+    def add_table_caption(self, text: str) -> None:
+        paragraph = self._new_paragraph(
+            style="Caption", keep_with_next=True, space_after=Pt(3)
+        )
+        self.add_inline(
+            paragraph, text, size=max(8.5, self.profile.font_size - 1.0)
+        )
 
     def add_list_item(self, match: re.Match[str]) -> None:
         level = min(3, len(match.group("indent").replace("\t", "    ")) // 2)
-        paragraph = self.document.add_paragraph()
-        paragraph.paragraph_format.left_indent = Inches(0.28 + 0.20 * level)
-        paragraph.paragraph_format.first_line_indent = Inches(-0.18)
-        paragraph.paragraph_format.space_after = Pt(2)
+        paragraph = self._new_paragraph(
+            left_indent=Inches(0.28 + 0.20 * level),
+            first_line_indent=Inches(-0.18),
+            space_after=Pt(2),
+        )
         marker = "•" if match.group("bullet") else f"{match.group('number')}."
         self.add_text(paragraph, marker + " ", bold=False)
         self.add_inline(paragraph, match.group("text"))
 
     def add_blockquote(self, lines: Sequence[str]) -> None:
-        paragraph = self.document.add_paragraph()
-        paragraph.paragraph_format.left_indent = Inches(0.25)
-        paragraph.paragraph_format.right_indent = Inches(0.12)
-        paragraph.paragraph_format.space_before = Pt(3)
-        paragraph.paragraph_format.space_after = Pt(5)
+        paragraph = self._new_paragraph(
+            left_indent=Inches(0.25),
+            right_indent=Inches(0.12),
+            space_before=Pt(3),
+            space_after=Pt(5),
+        )
         paragraph_left_border(paragraph)
         value = " ".join(re.sub(r"^\s*>\s?", "", line).strip() for line in lines)
         self.add_inline(paragraph, value)
@@ -349,14 +377,11 @@ class Renderer:
                     size=cell_size,
                 )
         self.table_count += 1
-        spacer = self.document.add_paragraph()
-        spacer.paragraph_format.space_after = Pt(0)
+        self._new_paragraph(space_after=Pt(0))
 
     def add_code_block(self, language: str, lines: Sequence[str]) -> None:
         if language:
-            label = self.document.add_paragraph()
-            label.paragraph_format.space_before = Pt(3)
-            label.paragraph_format.space_after = Pt(1)
+            label = self._new_paragraph(space_before=Pt(3), space_after=Pt(1))
             self.add_text(
                 label,
                 language,
@@ -366,13 +391,14 @@ class Renderer:
                 color=GRAY,
             )
         for index, line in enumerate(lines or [""]):
-            paragraph = self.document.add_paragraph()
-            paragraph.paragraph_format.left_indent = Inches(0.16)
-            paragraph.paragraph_format.right_indent = Inches(0.08)
-            paragraph.paragraph_format.space_before = Pt(0)
-            paragraph.paragraph_format.space_after = Pt(0 if index + 1 < len(lines) else 5)
-            paragraph.paragraph_format.line_spacing = 1.0
-            paragraph.paragraph_format.keep_together = True
+            paragraph = self._new_paragraph(
+                left_indent=Inches(0.16),
+                right_indent=Inches(0.08),
+                space_before=Pt(0),
+                space_after=Pt(0 if index + 1 < len(lines) else 5),
+                line_spacing=1.0,
+                keep_together=True,
+            )
             shade_paragraph(paragraph, "F2F2F2")
             self.add_text(
                 paragraph,
@@ -431,8 +457,7 @@ class Renderer:
                     raise RuntimeError(detail or "Mermaid produced no image")
                 if output_path.read_bytes()[:8] != b"\x89PNG\r\n\x1a\n":
                     raise RuntimeError("Mermaid output is not a valid PNG")
-                paragraph = self.document.add_paragraph()
-                paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                paragraph = self._new_paragraph(alignment=WD_ALIGN_PARAGRAPH.CENTER)
                 run = paragraph.add_run()
                 run.add_picture(str(output_path), width=Inches(self.usable_width))
                 self.figure_count += 1
@@ -446,7 +471,7 @@ class Renderer:
             self.add_code_block("mermaid", lines)
 
     def add_image(self, alt: str, raw_target: str) -> None:
-        target = urllib.parse.unquote(parse_link_target(raw_target))
+        target = parse_image_target(raw_target)
         if re.match(r"^https?://", target, re.I):
             self.warnings.append(f"remote image not embedded: {target}")
             self.add_paragraph(f"Image not embedded: {alt or target} ({target})")
@@ -454,14 +479,19 @@ class Renderer:
         path = (self.source.parent / target).resolve()
         if not path.is_file():
             raise FileNotFoundError(f"Image does not exist: {target}")
-        paragraph = self.document.add_paragraph()
-        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        paragraph = self._new_paragraph(alignment=WD_ALIGN_PARAGRAPH.CENTER)
         run = paragraph.add_run()
-        run.add_picture(str(path), width=Inches(min(6.5, self.usable_width)))
+        try:
+            run.add_picture(str(path), width=Inches(min(6.5, self.usable_width)))
+        except (
+            InvalidImageStreamError,
+            UnexpectedEndOfFileError,
+            UnrecognizedImageError,
+        ) as error:
+            raise ValueError(f"Image is unsupported or corrupt: {target}") from error
         self.figure_count += 1
         if alt:
-            caption = self.document.add_paragraph()
-            caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            caption = self._new_paragraph(alignment=WD_ALIGN_PARAGRAPH.CENTER)
             self.add_text(
                 caption,
                 alt,
@@ -484,11 +514,7 @@ class Renderer:
             or stripped.startswith("<!--")
         ):
             return True
-        return (
-            "|" in lines[index]
-            and index + 1 < len(lines)
-            and is_table_separator(lines[index + 1])
-        )
+        return is_table_start(lines, index)
 
     def render(self, source_lines: Sequence[str]) -> None:
         lines, _offset = strip_front_matter(source_lines)
@@ -514,7 +540,7 @@ class Renderer:
                 language = fence_match.group("info").strip().split(maxsplit=1)[0]
                 index += 1
                 block: list[str] = []
-                close_re = re.compile(rf"^\s*{re.escape(fence[0])}{{{len(fence)},}}\s*$")
+                close_re = fence_closer(fence)
                 while index < len(lines) and not close_re.match(lines[index]):
                     block.append(lines[index])
                     index += 1
@@ -534,8 +560,7 @@ class Renderer:
                 continue
 
             if stripped in {"---", "***", "___"}:
-                paragraph = self.document.add_paragraph()
-                paragraph.paragraph_format.space_after = Pt(5)
+                paragraph = self._new_paragraph(space_after=Pt(5))
                 horizontal_rule(paragraph)
                 index += 1
                 continue
@@ -546,24 +571,26 @@ class Renderer:
                 index += 1
                 continue
 
-            if (
-                "|" in line
-                and index + 1 < len(lines)
-                and is_table_separator(lines[index + 1])
-            ):
+            caption = table_caption_text(line)
+            if caption is not None:
+                table_index = next_nonblank_index(lines, index + 1)
+                if table_index is not None and is_table_start(lines, table_index):
+                    self.add_table_caption(caption)
+                    index = table_index
+                    continue
+
+            if is_table_start(lines, index):
                 header = split_table_row(line)
                 separator = lines[index + 1]
-                index += 2
+                index, parsed_rows = parse_table_rows(lines, index + 2)
                 rows: list[list[str]] = []
-                while index < len(lines) and lines[index].strip() and "|" in lines[index]:
-                    row = split_table_row(lines[index])
+                for row_index, row in parsed_rows:
                     if len(row) != len(header):
                         raise ValueError(
-                            f"Table row at Markdown line {index + 1} has "
+                            f"Table row at Markdown line {row_index + 1} has "
                             f"{len(row)} cells; expected {len(header)}"
                         )
                     rows.append(row)
-                    index += 1
                 self.add_table(header, rows, separator)
                 continue
 

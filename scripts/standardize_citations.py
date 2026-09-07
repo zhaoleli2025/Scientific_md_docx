@@ -15,7 +15,10 @@ from md_common import (
     expand_citation,
     fence_mask,
     format_citation,
+    iter_citations,
     parse_references,
+    reference_section_end,
+    strip_front_matter,
 )
 
 
@@ -23,23 +26,21 @@ def normalize(text: str) -> tuple[str, list[int]]:
     """Return normalized Markdown and old numbers that remain uncited."""
 
     trailing_newline = text.endswith("\n")
-    lines = text.splitlines()
+    source_lines = text.splitlines()
+    lines, offset = strip_front_matter(source_lines)
     mask = fence_mask(lines)
     heading, entries = parse_references(lines, mask)
 
-    citations_exist = any(
-        CITATION_RE.search(line)
-        for index, line in enumerate(lines)
-        if not mask[index] and (heading is None or index < heading)
-    )
+    citations_exist = next(iter_citations(lines, mask), None) is not None
     if citations_exist and heading is None:
         raise ValueError("Numeric citations are present but no References heading exists")
     if citations_exist and not entries:
         raise ValueError("Numeric citations are present but no numbered references exist")
     if heading is None:
         return text, []
+    section_end = reference_section_end(lines, heading, mask)
     if not entries:
-        if any(line.strip() for line in lines[heading + 1 :]):
+        if any(line.strip() for line in lines[heading + 1 : section_end]):
             raise ValueError("References section has content but no numbered entries")
         return text, []
     if any(line.strip() for line in lines[heading + 1 : entries[0].start]):
@@ -48,26 +49,26 @@ def normalize(text: str) -> tuple[str, list[int]]:
     order, cited = citation_order(lines, entries, mask)
     mapping = {old: new for new, old in enumerate(order, start=1)}
 
-    body = list(lines[:heading])
-    body_mask = mask[:heading]
-    for index, line in enumerate(body):
-        if body_mask[index]:
+    renumbered = list(lines)
+    for index, line in enumerate(renumbered):
+        if mask[index] or heading <= index < section_end:
             continue
 
         def replace(match):
             old_numbers = expand_citation(match.group("cites"))
             return format_citation(mapping[number] for number in old_numbers)
 
-        body[index] = CITATION_RE.sub(replace, line)
+        renumbered[index] = CITATION_RE.sub(replace, line)
 
     by_number = {entry.number: entry for entry in entries}
-    normalized_lines = [*body, lines[heading]]
-    if entries:
-        normalized_lines.append("")
-        for new_number, old_number in enumerate(order, start=1):
-            normalized_lines.extend(by_number[old_number].with_number(new_number))
+    normalized_body = [*renumbered[:heading], lines[heading], ""]
+    for new_number, old_number in enumerate(order, start=1):
+        normalized_body.extend(by_number[old_number].with_number(new_number))
+    if section_end < len(lines):
+        normalized_body.append("")
+        normalized_body.extend(renumbered[section_end:])
 
-    result = "\n".join(normalized_lines).rstrip()
+    result = "\n".join([*source_lines[:offset], *normalized_body]).rstrip()
     if trailing_newline:
         result += "\n"
     uncited = [entry.number for entry in entries if entry.number not in cited]

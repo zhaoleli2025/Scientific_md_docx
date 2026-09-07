@@ -1,4 +1,4 @@
 interface:
   display_name: "Scientific Markdown & DOCX"
   short_description: "Evidence-grounded scientific authoring and DOCX"
-  default_prompt: "Use $scientific-md-docx to find and verify relevant publications, then create clear scientific Markdown with detection-style citations, concise tables, workflows, and a validated DOCX."
+  default_prompt: "Use $scientific-md-docx to create or revise an evidence-grounded scientific Markdown document and render a validated DOCX when requested."

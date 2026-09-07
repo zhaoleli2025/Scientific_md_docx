@@ -11,19 +11,24 @@ from pathlib import Path
 
 from md_common import (
     CITATION_RE,
+    HEADING_RE,
+    IMAGE_RE,
     citation_order,
     fence_mask,
     format_citation,
-    is_table_separator,
+    is_table_start,
     iter_citations,
+    next_nonblank_index,
+    parse_image_target,
     parse_references,
+    parse_table_rows,
+    reference_section_end,
     split_table_row,
     strip_front_matter,
+    table_caption_text,
 )
 
 
-HEADING_RE = re.compile(r"^\s*(#{1,6})\s+(.+?)\s*$")
-IMAGE_RE = re.compile(r"^\s*!\[([^]]*)\]\(([^)]+)\)\s*$")
 DOI_RE = re.compile(r"(?:doi:\s*|https?://doi\.org/)(10\.\d{4,9}/\S+)", re.I)
 
 
@@ -94,7 +99,11 @@ def validate(path: Path) -> list[Issue]:
         add(issues, "error", "references", str(error))
         return issues
 
-    citations = list(iter_citations(body_lines, mask))
+    try:
+        citations = list(iter_citations(body_lines, mask))
+    except ValueError as error:
+        add(issues, "error", "citation", str(error))
+        return issues
     if citations and heading is None:
         add(
             issues,
@@ -112,7 +121,8 @@ def validate(path: Path) -> list[Issue]:
         )
 
     if heading is not None:
-        first_entry = entries[0].start if entries else len(body_lines)
+        section_end = reference_section_end(body_lines, heading, mask)
+        first_entry = entries[0].start if entries else section_end
         for index in range(heading + 1, first_entry):
             if body_lines[index].strip():
                 add(
@@ -210,11 +220,9 @@ def validate(path: Path) -> list[Issue]:
         if mask[index]:
             index += 1
             continue
-        candidate = body_lines[index]
-        separator = body_lines[index + 1]
-        if "|" in candidate and not mask[index + 1] and is_table_separator(separator):
-            columns = len(split_table_row(candidate))
-            separator_columns = len(split_table_row(separator))
+        if is_table_start(body_lines, index, mask):
+            columns = len(split_table_row(body_lines[index]))
+            separator_columns = len(split_table_row(body_lines[index + 1]))
             if columns != separator_columns:
                 add(
                     issues,
@@ -223,27 +231,18 @@ def validate(path: Path) -> list[Issue]:
                     f"Header has {columns} cells but separator has {separator_columns}",
                     index + offset + 2,
                 )
-            cursor = index + 2
-            rows = 0
-            while (
-                cursor < len(body_lines)
-                and "|" in body_lines[cursor]
-                and body_lines[cursor].strip()
-            ):
-                if mask[cursor]:
-                    break
-                row_columns = len(split_table_row(body_lines[cursor]))
+            cursor, rows = parse_table_rows(body_lines, index + 2, mask)
+            for row_index, row in rows:
+                row_columns = len(row)
                 if row_columns != columns:
                     add(
                         issues,
                         "error",
                         "table-columns",
                         f"Table row has {row_columns} cells; expected {columns}",
-                        cursor + offset + 1,
+                        row_index + offset + 1,
                     )
-                rows += 1
-                cursor += 1
-            if rows == 0:
+            if not rows:
                 add(
                     issues,
                     "warning",
@@ -251,6 +250,25 @@ def validate(path: Path) -> list[Issue]:
                     "Table has a header but no data rows",
                     index + offset + 1,
                 )
+            caption_index = next_nonblank_index(body_lines, cursor)
+            if (
+                caption_index is not None
+                and not mask[caption_index]
+                and table_caption_text(body_lines[caption_index]) is not None
+            ):
+                following = next_nonblank_index(body_lines, caption_index + 1)
+                caption_belongs_to_next_table = (
+                    following is not None
+                    and is_table_start(body_lines, following, mask)
+                )
+                if not caption_belongs_to_next_table:
+                    add(
+                        issues,
+                        "error",
+                        "table-caption-position",
+                        "Place the table caption once, immediately above the table",
+                        caption_index + offset + 1,
+                    )
             index = cursor
             continue
         index += 1
@@ -260,7 +278,7 @@ def validate(path: Path) -> list[Issue]:
             continue
         image = IMAGE_RE.match(line)
         if image:
-            target = image.group(2).strip().split(maxsplit=1)[0].strip("<>")
+            target = parse_image_target(image.group("target"))
             if re.match(r"https?://", target, re.I):
                 add(
                     issues,
